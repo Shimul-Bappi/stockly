@@ -1,0 +1,7 @@
+      - name: Run actions/setup-node@v4
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          # Add this line below to point to your subfolder:
+          cache-dependency-path: './stockly/package-lock.json' 
