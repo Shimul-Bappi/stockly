@@ -64,31 +64,59 @@ export async function performAction(input: z.infer<typeof actionSchema>) {
   }
 
   if (input.action === "stockIn" || input.action === "recordSale") {
-    if (/^LBL-/i.test(input.code)) {
-      throw new ActionError("Independent LBL serials do not change stock. Scan a product stock tag instead.");
-    }
+    const isSale = input.action === "recordSale";
+    const isLabelScan = /^LBL-/i.test(input.code);
     return db.transaction(async (tx) => {
-      const [product] = await tx.select().from(products)
-        .where(or(eq(products.barcode, input.code), eq(products.sku, input.code.toUpperCase())))
-        .limit(1).for("update");
-      if (!product) throw new ActionError("No product found for that barcode or SKU", 404);
+      let product: typeof products.$inferSelect | undefined;
+      let label: typeof generatedLabels.$inferSelect | undefined;
+
+      if (isLabelScan) {
+        // A printed LBL- serial is one physical unit. If it was generated from a catalog
+        // product it resolves to that product; custom labels have no product to update.
+        const match = /^LBL-(\d{1,19})$/i.exec(input.code);
+        const serial = match ? BigInt(match[1]) : BigInt(0);
+        if (serial <= BigInt(0) || serial > BigInt("9223372036854775807")) throw new ActionError("Unrecognized LBL serial", 404);
+        [label] = await tx.select().from(generatedLabels).where(eq(generatedLabels.serial, serial)).limit(1).for("update");
+        if (!label) throw new ActionError("No saved label was found for that serial", 404);
+        if (!label.productId) {
+          throw new ActionError("This label was made for a custom item that is not linked to a catalog product, so it cannot change stock. Generate labels from a catalog product instead.", 409);
+        }
+        [product] = await tx.select().from(products).where(eq(products.id, label.productId)).limit(1).for("update");
+        if (!product) throw new ActionError("The product for this label no longer exists", 404);
+      } else {
+        [product] = await tx.select().from(products)
+          .where(or(eq(products.barcode, input.code), eq(products.sku, input.code.toUpperCase())))
+          .limit(1).for("update");
+        if (!product) throw new ActionError("No product found for that barcode or SKU", 404);
+      }
 
       const [previous] = await tx.select().from(stockMovements).where(eq(stockMovements.requestId, input.requestId)).limit(1);
       if (previous) return { message: "This scan was already recorded", productName: product.name, stockAfter: product.stock, duplicate: true };
 
-      if (input.action === "recordSale" && product.stock < input.quantity) {
+      // Per-unit protection: a serial can be received once and sold once.
+      if (label) {
+        if (label.soldAt) throw new ActionError("This label was already sold", 409);
+        if (!isSale && label.stockedAt) throw new ActionError("This label was already added to stock", 409);
+      }
+      const quantity = label ? 1 : input.quantity;
+
+      if (isSale && product.stock < quantity) {
         throw new ActionError(`Only ${product.stock} unit${product.stock === 1 ? "" : "s"} of ${product.name} available`, 409);
       }
-      const isSale = input.action === "recordSale";
-      const newStock = product.stock + (isSale ? -input.quantity : input.quantity);
+      const newStock = product.stock + (isSale ? -quantity : quantity);
       await tx.update(products).set({ stock: newStock, updatedAt: new Date() }).where(eq(products.id, product.id));
+      if (label) {
+        await tx.update(generatedLabels)
+          .set(isSale ? { soldAt: new Date() } : { stockedAt: new Date() })
+          .where(eq(generatedLabels.serial, label.serial));
+      }
 
       if (isSale) {
         await tx.insert(sales).values({
           productId: product.id,
-          quantity: input.quantity,
+          quantity,
           unitPrice: product.mrp,
-          total: (Math.round(Number(product.mrp) * input.quantity * 100) / 100).toFixed(2),
+          total: (Math.round(Number(product.mrp) * quantity * 100) / 100).toFixed(2),
           paymentMethod: input.paymentMethod,
         });
       }
@@ -96,15 +124,17 @@ export async function performAction(input: z.infer<typeof actionSchema>) {
         productId: product.id,
         kind: isSale ? "sale" : "stock_in",
         requestId: input.requestId,
-        quantityChange: isSale ? -input.quantity : input.quantity,
+        quantityChange: isSale ? -quantity : quantity,
         stockAfter: newStock,
-        note: isSale ? `${input.paymentMethod} sale` : input.note || "Stock received by barcode scan",
+        note: isSale
+          ? `${input.paymentMethod} sale${label ? ` (${input.code.toUpperCase()})` : ""}`
+          : input.note || (label ? `Received by label scan ${input.code.toUpperCase()}` : "Stock received by barcode scan"),
       });
       return {
-        message: isSale ? `Sale recorded for ${product.name}` : `${input.quantity} ${input.quantity === 1 ? "unit" : "units"} of ${product.name} added`,
+        message: isSale ? `Sale recorded for ${product.name}` : `${quantity} ${quantity === 1 ? "unit" : "units"} of ${product.name} added`,
         productName: product.name,
         stockAfter: newStock,
-        total: isSale ? Number(product.mrp) * input.quantity : undefined,
+        total: isSale ? Number(product.mrp) * quantity : undefined,
       };
     });
   }
@@ -148,6 +178,7 @@ export async function performAction(input: z.infer<typeof actionSchema>) {
             position: rows.length + 1,
             productName: product ? product.name : item.source === "custom" ? item.name : "",
             sku: product?.sku ?? null,
+            productId: product?.id ?? null,
             mrp: product ? product.mrp : item.source === "custom" ? item.mrp.toFixed(2) : "0.00",
           });
         }
