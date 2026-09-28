@@ -84,7 +84,12 @@ export const generatedLabels = pgTable("generated_labels", {
   position: integer("position").notNull(),
   productName: text("product_name").notNull(),
   sku: text("sku"),
+  // Link to the catalog product (null for custom labels, which can never change stock).
+  productId: uuid("product_id").references(() => products.id),
   mrp: numeric("mrp", { precision: 12, scale: 2 }).notNull(),
+  // One label = one physical unit. These make each serial single-use per direction.
+  stockedAt: timestamp("stocked_at", { withTimezone: true }),
+  soldAt: timestamp("sold_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("generated_labels_sheet_position_idx").on(table.sheetId, table.position),
