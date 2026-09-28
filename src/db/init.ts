@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS generated_labels (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS generated_labels_sheet_position_idx ON generated_labels(sheet_id, position);
 DO $$ BEGIN ALTER TABLE generated_labels ADD CONSTRAINT generated_labels_position_range CHECK (position between 1 and 20); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE generated_labels ADD COLUMN IF NOT EXISTS product_id UUID REFERENCES products(id);
+ALTER TABLE generated_labels ADD COLUMN IF NOT EXISTS stocked_at TIMESTAMPTZ;
+ALTER TABLE generated_labels ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ;
+UPDATE generated_labels g SET product_id = p.id FROM products p WHERE g.product_id IS NULL AND g.sku IS NOT NULL AND p.sku = g.sku;
+CREATE INDEX IF NOT EXISTS generated_labels_product_idx ON generated_labels(product_id);
 DO $$ BEGIN ALTER TABLE generated_labels ADD CONSTRAINT generated_labels_mrp_positive CHECK (mrp > 0); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 `;
 
